@@ -18,6 +18,27 @@ from pathlib import Path
 # Paths
 # ---------------------------------------------------------------------------
 ROOT = Path(__file__).resolve().parents[1]
+
+
+def _load_dotenv(path: Path | None = None) -> None:
+    """Load KEY=VALUE lines from the repo's gitignored ``.env`` (no dependency).
+
+    Existing environment variables win (``setdefault``), so an exported
+    ``FRED_API_KEY`` overrides whatever is in ``.env``.
+    """
+    path = path or ROOT / ".env"
+    if not path.exists():
+        return
+    for line in path.read_text(encoding="utf-8").splitlines():
+        line = line.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        key, val = line.split("=", 1)
+        os.environ.setdefault(key.strip(), val.strip())
+
+
+_load_dotenv()
+
 SRC = ROOT / "src"
 DATA = ROOT / "data"
 TEXT_DIR = DATA / "texts"          # raw FOMC statements, minutes, speeches
@@ -42,7 +63,7 @@ WARSH_START = "2026-05-22"
 TODAY = "2026-09-13"
 
 # ---------------------------------------------------------------------------
-# FRED series  (no API key needed -- fredgraph.csv endpoint)
+# FRED series
 # ---------------------------------------------------------------------------
 #   T10Y2Y : 10-Year minus 2-Year Treasury constant-maturity spread
 #   DGS1   : 1-Year Treasury constant-maturity yield
@@ -53,7 +74,23 @@ FRED_SERIES = {
     "dgs3mo": "DGS3MO",
 }
 
+# Free FRED API key (from https://fred.stlouisfed.org/docs/api/api_key.html).
+# Put it in the repo's gitignored `.env` as FRED_API_KEY=..., or export it.
+# When present the FRED API (api.stlouisfed.org) is used; otherwise the code
+# falls back to fredgraph.csv and then to the U.S. Treasury yield curve.
+FRED_API_KEY = os.environ.get("FRED_API_KEY", "")
+FRED_API_URL = "https://api.stlouisfed.org/fred/series/observations"
+
 FRED_CSV_URL = "https://fred.stlouisfed.org/graph/fredgraph.csv?id={sid}"
+
+# Fallback when fred.stlouisfed.org is unreachable: the U.S. Treasury daily
+# yield curve (no key).  "3 Mo" -> DGS3MO, "1 Yr" -> DGS1, "10 Yr" - "2 Yr" ->
+# T10Y2Y.  One request per calendar year.
+TREASURY_CSV_URL = (
+    "https://home.treasury.gov/resource-center/data-chart-center/"
+    "interest-rates/daily-treasury-rates.csv/{year}/all"
+    "?type=daily_treasury_yield_curve&field_tdr_date_value=all&_format=csv"
+)
 
 # ---------------------------------------------------------------------------
 # Yahoo Finance tickers
@@ -66,6 +103,10 @@ YAHOO_TICKERS = {
     "iwf": "IWF",
     "iwn": "IWN",
 }
+
+# Yahoo Finance chart API (used directly via requests; yfinance has proven
+# flaky here).  period1/period2 are unix timestamps.
+YAHOO_CHART_URL = "https://query1.finance.yahoo.com/v8/finance/chart/{ticker}"
 
 # ---------------------------------------------------------------------------
 # Federal Reserve JSON feeds (text sources)
@@ -86,3 +127,13 @@ CHAIR_NAMES = ("Powell", "Warsh")
 # ---------------------------------------------------------------------------
 USER_AGENT = os.environ.get("FED_USER_AGENT", "Mozilla/5.0 (research; NYU FRE-GY 7871)")
 REQUEST_TIMEOUT = 60  # seconds
+
+# ---------------------------------------------------------------------------
+# FinBERT model
+# ---------------------------------------------------------------------------
+# Prefer a pre-downloaded local copy (skips a ~400 MB download); override with
+# the FINBERT_MODEL environment variable or by pointing this at any local dir.
+FINBERT_MODEL = os.environ.get("FINBERT_MODEL", "ProsusAI/finbert")
+_finbert_local = ROOT.parent.parent / ".finbert-local"
+if _finbert_local.exists():
+    FINBERT_MODEL = str(_finbert_local)

@@ -23,6 +23,8 @@ import re
 import numpy as np
 import pandas as pd
 
+from .config import FINBERT_MODEL
+
 # Key sentences from "Parsing the Fed" (Method 1: Factor Similarity).
 KEY_SENTENCES = {
     "hawkish": ["Interest rates will rise", "Inflation will rise"],
@@ -31,6 +33,7 @@ KEY_SENTENCES = {
 
 _MODEL = None
 _PIPE = None
+_KEY_EMB = None  # cached embeddings of the four key sentences
 
 
 def _get_model():
@@ -38,19 +41,18 @@ def _get_model():
     global _MODEL
     if _MODEL is None:
         from transformers import AutoModel, AutoTokenizer
-        name = "ProsusAI/finbert"
-        _MODEL = (AutoTokenizer.from_pretrained(name),
-                  AutoModel.from_pretrained(name))
+        _MODEL = (AutoTokenizer.from_pretrained(FINBERT_MODEL),
+                  AutoModel.from_pretrained(FINBERT_MODEL))
     return _MODEL
 
 
 def _get_pipeline():
-    """Lazily load the FinBERT sentiment-analysis pipeline."""
+    """Lazily load the FinBERT sentiment-analysis pipeline (all three labels)."""
     global _PIPE
     if _PIPE is None:
         from transformers import pipeline
-        _PIPE = pipeline("sentiment-analysis", model="ProsusAI/finbert",
-                         truncation=True)
+        # top_k=None -> return positive/negative/neutral together.
+        _PIPE = pipeline("sentiment-analysis", model=FINBERT_MODEL, top_k=None)
     return _PIPE
 
 
@@ -79,25 +81,44 @@ def _cosine(a: np.ndarray, b: np.ndarray) -> float:
     return float(np.dot(a, b) / denom) if denom else 0.0
 
 
+def _key_embeddings() -> dict:
+    """Embed the four key sentences once and cache them (they never change)."""
+    global _KEY_EMB
+    if _KEY_EMB is None:
+        _KEY_EMB = {
+            "hawkish": [_embed(s) for s in KEY_SENTENCES["hawkish"]],
+            "dovish": [_embed(s) for s in KEY_SENTENCES["dovish"]],
+        }
+    return _KEY_EMB
+
+
 # ---------------------------------------------------------------------------
 # Variant A: sentence sentiment
 # ---------------------------------------------------------------------------
 def finbert_sentiment(text: str) -> dict:
-    """Average FinBERT pos/neg/neutral probability over sentences."""
+    """Average FinBERT pos/neg/neutral probability over sentences.
+
+    Sentences are scored in batches of 32 (the pipeline accepts a list and
+    returns one [pos, neg, neu] triple per sentence).
+    """
     sentences = [s.strip() for s in re.split(r"(?<=[.!?])\s+", text) if s.strip()]
+    sentences = [s[:512] for s in sentences[:512]]  # cap count + length
     if not sentences:
         return {"pos": 0.0, "neg": 0.0, "neu": 0.0, "label": "neutral"}
+
     pipe = _get_pipeline()
     pos = neg = neu = 0.0
-    for s in sentences[:512]:  # cap for speed on very long minutes
-        for r in pipe(s[:512]):
-            if r["label"] == "positive":
-                pos += r["score"]
-            elif r["label"] == "negative":
-                neg += r["score"]
-            else:
-                neu += r["score"]
-    n = min(len(sentences), 512)
+    n = 0
+    for i in range(0, len(sentences), 32):
+        for row in pipe(sentences[i:i + 32]):   # row = [{pos},{neg},{neu}]
+            for r in row:
+                if r["label"] == "positive":
+                    pos += r["score"]
+                elif r["label"] == "negative":
+                    neg += r["score"]
+                else:
+                    neu += r["score"]
+        n += len(sentences[i:i + 32])
     return {"pos": pos / n, "neg": neg / n, "neu": neu / n,
             "label": "positive" if pos >= neg else "negative"}
 
@@ -105,12 +126,12 @@ def finbert_sentiment(text: str) -> dict:
 # ---------------------------------------------------------------------------
 # Variant B: factor similarity to key sentences
 # ---------------------------------------------------------------------------
-def finbert_similarity(text: str, key_sentences: dict | None = None) -> dict:
+def finbert_similarity(text: str) -> dict:
     """Cosine similarity to hawkish vs dovish key sentences."""
-    key_sentences = key_sentences or KEY_SENTENCES
     doc = _embed(text)
-    sim_hawk = np.mean([_cosine(doc, _embed(s)) for s in key_sentences["hawkish"]])
-    sim_dove = np.mean([_cosine(doc, _embed(s)) for s in key_sentences["dovish"]])
+    key = _key_embeddings()  # cached: no per-document re-embedding of key sentences
+    sim_hawk = float(np.mean([_cosine(doc, e) for e in key["hawkish"]]))
+    sim_dove = float(np.mean([_cosine(doc, e) for e in key["dovish"]]))
     return {"sim_hawk": sim_hawk, "sim_dove": sim_dove,
             "sim_net": sim_hawk - sim_dove}
 
@@ -119,15 +140,22 @@ def finbert_similarity(text: str, key_sentences: dict | None = None) -> dict:
 # DataFrame helpers
 # ---------------------------------------------------------------------------
 def score_dataframe(docs: pd.DataFrame, text_col: str = "text",
-                    method: str = "both") -> pd.DataFrame:
-    """Attach FinBERT scores (``finbert_sentiment`` and/or ``finbert_similarity``)."""
+                    method: str = "both", progress: bool = True) -> pd.DataFrame:
+    """Attach FinBERT scores with a progress bar (one pass over documents)."""
+    from tqdm.auto import tqdm
+
     out = docs.copy()
-    if method in ("sentiment", "both"):
-        s = out[text_col].map(finbert_sentiment)
-        for k in ("pos", "neg", "neu"):
-            out[f"fb_{k}"] = [x[k] for x in s]
-    if method in ("similarity", "both"):
-        s = out[text_col].map(finbert_similarity)
-        for k in ("sim_hawk", "sim_dove", "sim_net"):
-            out[f"fb_{k}"] = [x[k] for x in s]
+    rows = []
+    for text in tqdm(out[text_col].tolist(), desc="FinBERT",
+                     disable=not progress, unit="doc"):
+        row = {}
+        if method in ("sentiment", "both"):
+            s = finbert_sentiment(text)
+            row.update({f"fb_{k}": s[k] for k in ("pos", "neg", "neu")})
+        if method in ("similarity", "both"):
+            s = finbert_similarity(text)
+            row.update({f"fb_{k}": s[k] for k in ("sim_hawk", "sim_dove", "sim_net")})
+        rows.append(row)
+    for key in rows[0]:
+        out[key] = [r[key] for r in rows]
     return out

@@ -237,33 +237,49 @@ def collect() -> pd.DataFrame:
     return df
 
 
-def collect_press_conferences(statement_dates: pd.Series | list) -> pd.DataFrame:
-    """Best-effort collection of post-meeting press-conference transcripts.
+def _extract_presconf_pdf(dt: pd.Timestamp) -> str | None:
+    """Download and text-extract a press-conference transcript PDF.
 
-    The transcript URL is ``/monetarypolicy/fomcpresconf{yyyymmdd}.htm`` keyed
-    on the *meeting* (statement) date.  Meetings without a press conference
-    simply 404 and are skipped.
+    The transcript is published as a PDF (``/mediacenter/files/FOMCpresconf
+    {yyyymmdd}.pdf``); the HTML page at ``/monetarypolicy/fomcpresconf*.htm``
+    is only a video player and does NOT contain the transcript.
+    """
+    try:
+        import io
+        from pypdf import PdfReader
+    except ImportError:
+        return None  # pypdf missing; skip rather than store the boilerplate page
+    url = f"{FED_BASE}/mediacenter/files/FOMCpresconf{dt:%Y%m%d}.pdf"
+    try:
+        r = requests.get(url, timeout=REQUEST_TIMEOUT, headers=_HEADERS)
+        if r.status_code != 200:
+            return None
+        reader = PdfReader(io.BytesIO(r.content))
+        text = "\n\n".join((p.extract_text() or "") for p in reader.pages)
+        return text.strip() or None
+    except Exception:
+        return None
+
+
+def collect_press_conferences(statement_dates: pd.Series | list) -> pd.DataFrame:
+    """Collect post-meeting press-conference transcripts (PDF text).
+
+    Keyed on the *meeting* (statement) date.  Meetings without a press
+    conference have no PDF and are skipped.
     """
     docs = []
     for d in statement_dates:
         dt = pd.Timestamp(d)
-        url = f"{FED_BASE}/monetarypolicy/fomcpresconf{dt:%Y%m%d}.htm"
-        try:
-            r = requests.get(url, timeout=REQUEST_TIMEOUT, headers=_HEADERS)
-            if r.status_code != 200:
-                continue
-            text = extract_article_text(url)
-            if text:
-                docs.append({
-                    "kind": "presconf",
-                    "date": dt,
-                    "chair": chair_at(dt),
-                    "title": f"FOMC press conference {dt:%B %d, %Y}",
-                    "url": url,
-                    "text": text,
-                })
-        except requests.RequestException:
-            continue
+        text = _extract_presconf_pdf(dt)
+        if text:
+            docs.append({
+                "kind": "presconf",
+                "date": dt,
+                "chair": chair_at(dt),
+                "title": f"FOMC press conference {dt:%B %d, %Y}",
+                "url": f"{FED_BASE}/mediacenter/files/FOMCpresconf{dt:%Y%m%d}.pdf",
+                "text": text,
+            })
         time.sleep(0.3)  # be polite
     return pd.DataFrame(docs)
 

@@ -23,21 +23,35 @@ bill change as the control, exactly the specification the assignment asks for:
 
 from __future__ import annotations
 
+import datetime as dt
+
 import numpy as np
 import pandas as pd
 import statsmodels.api as sm
 
 INDICATORS = ["dxy_chg", "t10y2y_chg", "dgs1_chg", "gv_chg"]
 
+# U.S. market close, used to decide whether a release reacts in the same
+# trading day's close or the next day's.
+_MARKET_CLOSE = dt.time(16, 0)
+
 
 # ---------------------------------------------------------------------------
 # One-day changes
 # ---------------------------------------------------------------------------
 def _prev_post(market_index: pd.DatetimeIndex, release: pd.Timestamp):
-    """Return (prev_close_label, post_close_label) around a release."""
+    """Return (prev_close_label, post_close_label) around a release.
+
+    ``market_index`` is date-only: each label is that day's *close*.  A release
+    at or before 4 p.m. ET reacts in that day's close (prev = prior day); one
+    after the close reacts in the next trading day's close (prev = release day).
+    """
     idx = market_index
-    prev = idx[idx < release]
-    post = idx[idx >= release]
+    day = release.normalize()
+    if release.time() > _MARKET_CLOSE:
+        day = day + pd.Timedelta(days=1)
+    prev = idx[idx < day]
+    post = idx[idx >= day]
     if len(prev) == 0 or len(post) == 0:
         return None, None
     return prev[-1], post[0]
