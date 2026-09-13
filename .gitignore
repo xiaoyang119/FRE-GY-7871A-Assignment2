@@ -188,3 +188,16 @@ data/
 # Generated figures/tables (the notebook keeps its output saved inline, so
 # these exported copies are not part of the repo either).
 outputs/
+
+# LaTeX build artifacts (report.pdf is generated from report.tex)
+*.aux
+*.log
+*.out
+*.synctex.gz
+*.fls
+*.fdb_latexmk
+
+# Report files (submitted to Brightspace, not part of the repo)
+REPORT.md
+report.tex
+report.pdf
